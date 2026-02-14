@@ -48,6 +48,10 @@ store = Store("/path/to/index.sqlite")
 function Store(path::AbstractString=":memory:"; embed=_USE_DEFAULT_EMBED)
     db = SQLite.DB(path)
     configure_db!(db)
+    Store(db; embed)
+end
+
+function Store(db::SQLite.DB; embed=_USE_DEFAULT_EMBED)
     init_schema!(db)
 
     embed_fn = if embed === _USE_DEFAULT_EMBED
