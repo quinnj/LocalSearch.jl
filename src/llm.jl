@@ -217,6 +217,17 @@ function default_embed(texts::Vector{String}; model::AbstractString=DEFAULT_MODE
     return result
 end
 
+"""
+    default_token_count(text; model=DEFAULT_MODEL_URI) -> Int
+
+Count model tokens for a text using the default llama.cpp embedding tokenizer.
+"""
+function default_token_count(text::AbstractString; model::AbstractString=DEFAULT_MODEL_URI)
+    state = get_state(; model_uri=model)
+    tokens = embed_tokens(state.model, text)
+    return length(tokens)
+end
+
 function __init__()
     atexit() do
         s = _state[]

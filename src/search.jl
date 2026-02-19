@@ -9,6 +9,73 @@ struct RankedItem
     score::Float64
 end
 
+# --- MMR (Maximal Marginal Relevance) ---
+
+"""Tokenize text into a set of lowercase alphanumeric tokens for Jaccard similarity."""
+function tokenize_for_mmr(text::AbstractString)
+    tokens = Set{String}()
+    for m in eachmatch(r"[a-z0-9_]+", lowercase(text))
+        push!(tokens, m.match)
+    end
+    return tokens
+end
+
+"""Jaccard similarity between two token sets. Returns value in [0, 1]."""
+function jaccard_similarity(a::Set{String}, b::Set{String})
+    isempty(a) && isempty(b) && return 1.0
+    (isempty(a) || isempty(b)) && return 0.0
+    intersection_size = length(intersect(a, b))
+    union_size = length(a) + length(b) - intersection_size
+    return union_size == 0 ? 0.0 : intersection_size / union_size
+end
+
+"""
+    mmr_rerank(results; lambda=0.7)
+
+Re-rank search results using Maximal Marginal Relevance.
+Iteratively selects items maximizing `λ * relevance - (1-λ) * max_similarity_to_selected`.
+"""
+function mmr_rerank(results::Vector{SearchResult}; lambda::Float64=0.7)
+    n = length(results)
+    n <= 1 && return copy(results)
+    lambda = clamp(lambda, 0.0, 1.0)
+
+    # Pre-tokenize
+    tokens = [tokenize_for_mmr(r.text) for r in results]
+
+    # Normalize scores to [0, 1]
+    scores = [r.score for r in results]
+    min_s, max_s = extrema(scores)
+    range_s = max_s - min_s
+    norm(s) = range_s == 0.0 ? 1.0 : (s - min_s) / range_s
+
+    selected = Int[]
+    remaining = Set(1:n)
+
+    while !isempty(remaining)
+        best_idx = 0
+        best_mmr = -Inf
+        best_orig = -Inf
+
+        for i in remaining
+            rel = norm(results[i].score)
+            max_sim = isempty(selected) ? 0.0 : maximum(jaccard_similarity(tokens[i], tokens[j]) for j in selected)
+            mmr_score = lambda * rel - (1 - lambda) * max_sim
+            if mmr_score > best_mmr || (mmr_score == best_mmr && results[i].score > best_orig)
+                best_mmr = mmr_score
+                best_idx = i
+                best_orig = results[i].score
+            end
+        end
+
+        best_idx == 0 && break
+        push!(selected, best_idx)
+        delete!(remaining, best_idx)
+    end
+
+    return [results[i] for i in selected]
+end
+
 # --- BM25 / FTS5 ---
 
 function build_fts_query(query::AbstractString)
@@ -24,9 +91,18 @@ function build_fts_query(query::AbstractString)
     return join(["\"$t\"*" for t in sanitized], " AND ")
 end
 
-function search_fts(store::Store, query::AbstractString; limit::Int=20)
+function build_tag_filter_clause(tags::Vector{String})
+    isempty(tags) && return "", Any[]
+    placeholders = join(fill("?", length(tags)), ",")
+    clause = " AND EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id AND dt.tag IN ($placeholders))"
+    return clause, Any[tags...]
+end
+
+function search_fts(store::Store, query::AbstractString; limit::Int=20, tags::Vector{String}=String[])
     fts_query = build_fts_query(query)
     fts_query === nothing && return SearchResult[]
+    normalized_tags = normalize_tags(tags)
+    tag_clause, tag_params = build_tag_filter_clause(normalized_tags)
 
     sql = """
     SELECT d.key, d.title, d.hash, c.body,
@@ -34,11 +110,14 @@ function search_fts(store::Store, query::AbstractString; limit::Int=20)
     FROM documents_fts f
     JOIN documents d ON d.id = f.rowid
     JOIN content c ON c.hash = d.hash
-    WHERE documents_fts MATCH ? AND d.active = 1
+    WHERE documents_fts MATCH ? AND d.active = 1$tag_clause
     ORDER BY rank ASC
     LIMIT ?
     """
-    rows = SQLite.DBInterface.execute(store.db, sql, (fts_query, limit))
+    params = Any[fts_query]
+    append!(params, tag_params)
+    push!(params, limit)
+    rows = SQLite.DBInterface.execute(store.db, sql, Tuple(params))
     results = SearchResult[]
     for row in rows
         score = 1.0 / (1.0 + max(0.0, -Float64(row.rank)))
@@ -49,8 +128,9 @@ end
 
 # --- Vector Search ---
 
-function search_vec(store::Store, query::AbstractString; limit::Int=20)
+function search_vec(store::Store, query::AbstractString; limit::Int=20, tags::Vector{String}=String[])
     has_vectors(store) || return SearchResult[]
+    normalized_tags = normalize_tags(tags)
 
     query_embedding = store.embed([query])[:, 1]
     vec = Float32.(query_embedding)
@@ -69,15 +149,18 @@ function search_vec(store::Store, query::AbstractString; limit::Int=20)
     isempty(hash_seqs) && return SearchResult[]
 
     placeholders = join(fill("?", length(hash_seqs)), ",")
+    tag_clause, tag_params = build_tag_filter_clause(normalized_tags)
     sql = """
     SELECT ch.hash || '_' || ch.seq as hash_seq,
            d.key, d.title, c.body
     FROM chunks ch
     JOIN documents d ON d.hash = ch.hash AND d.active = 1
     JOIN content c ON c.hash = d.hash
-    WHERE ch.hash || '_' || ch.seq IN ($placeholders)
+    WHERE ch.hash || '_' || ch.seq IN ($placeholders)$tag_clause
     """
-    doc_rows = SQLite.DBInterface.execute(store.db, sql, Tuple(hash_seqs))
+    params = Any[hash_seqs...]
+    append!(params, tag_params)
+    doc_rows = SQLite.DBInterface.execute(store.db, sql, Tuple(params))
 
     # Keep best (closest) match per document
     seen = Dict{String, Tuple{SearchResult, Float64}}()
@@ -130,26 +213,36 @@ end
 # --- Main Search ---
 
 """
-    search(store, query; limit=10, min_score=0.0)
+    search(store, query; limit=10, min_score=0.0, mmr=false, mmr_lambda=0.7, tags=nothing)
 
 Search the store for documents matching `query`.
 
 Returns a `Vector{SearchResult}` sorted by relevance. Uses BM25 full-text search
 when no embedding function was provided, or hybrid BM25 + vector search with
 Reciprocal Rank Fusion when embeddings are available.
-"""
-function search(store::Store, query::AbstractString; limit::Int=10, min_score::Float64=0.0)
-    use_vectors = has_vectors(store)
 
-    fts_results = search_fts(store, query; limit=20)
+When `mmr=true`, applies Maximal Marginal Relevance re-ranking to promote diversity.
+When `tags` is provided, only documents with at least one matching tag are considered.
+"""
+function search(store::Store, query::AbstractString;
+                limit::Int=10,
+                min_score::Float64=0.0,
+                mmr::Bool=false,
+                mmr_lambda::Float64=0.7,
+                tags=nothing)
+    use_vectors = has_vectors(store)
+    normalized_tags = normalize_tags(tags)
+
+    fts_results = search_fts(store, query; limit=20, tags=normalized_tags)
 
     if !use_vectors
         results = filter(r -> r.score >= min_score, fts_results)
-        return results[1:min(limit, length(results))]
+        results = results[1:min(limit, length(results))]
+        return mmr ? mmr_rerank(results; lambda=mmr_lambda) : results
     end
 
     # Hybrid: BM25 + Vector with RRF blending
-    vec_results = search_vec(store, query; limit=20)
+    vec_results = search_vec(store, query; limit=20, tags=normalized_tags)
 
     fts_ranked = [RankedItem(r.id, r.title, r.text, r.score) for r in fts_results]
     vec_ranked = [RankedItem(r.id, r.title, r.text, r.score) for r in vec_results]
@@ -162,5 +255,5 @@ function search(store::Store, query::AbstractString; limit::Int=10, min_score::F
         push!(results, SearchResult(item.key, item.title, item.body, item.score, :hybrid))
         length(results) >= limit && break
     end
-    return results
+    return mmr ? mmr_rerank(results; lambda=mmr_lambda) : results
 end

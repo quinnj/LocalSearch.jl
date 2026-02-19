@@ -7,7 +7,7 @@ import sqlite_vec_jll
 import llama_cpp_jll
 import Libdl
 
-export Store, load!, search, clear!
+export Store, load!, delete!, search, clear!, mmr_rerank
 
 """
     SearchResult
