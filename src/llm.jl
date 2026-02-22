@@ -190,31 +190,35 @@ Returns a `dims × length(texts)` Float32 matrix.
 Downloads the model on first use (~300MB, one-time).
 """
 function default_embed(texts::Vector{String}; model::AbstractString=DEFAULT_MODEL_URI)
-    state = get_state(; model_uri=model)
-    dims = state.dims
-    result = zeros(Float32, dims, length(texts))
+    # Lock required: llama.cpp context is not thread-safe; concurrent
+    # decode_batch calls on the shared _state.ctx cause segfaults.
+    lock(_state_lock) do
+        state = get_state(; model_uri=model)
+        dims = state.dims
+        result = zeros(Float32, dims, length(texts))
 
-    redirect_stderr(devnull) do
-        for (i, text) in enumerate(texts)
-            tokens = embed_tokens(state.model, text)
-            isempty(tokens) && continue
+        redirect_stderr(devnull) do
+            for (i, text) in enumerate(texts)
+                tokens = embed_tokens(state.model, text)
+                isempty(tokens) && continue
 
-            LlamaCppNative.kv_cache_clear(state.ctx)
-            rc = LlamaCppNative.decode_batch(state.ctx, tokens; start_pos=0, seq_id=0, logits=false)
-            rc < 0 && continue
+                LlamaCppNative.kv_cache_clear(state.ctx)
+                rc = LlamaCppNative.decode_batch(state.ctx, tokens; start_pos=0, seq_id=0, logits=false)
+                rc < 0 && continue
 
-            pooling = LlamaCppNative.pooling_type(state.ctx)
-            embedding = if pooling == LlamaCppNative.LLAMA_POOLING_TYPE_NONE
-                LlamaCppNative.embeddings_ith(state.ctx, length(tokens) - 1, dims)
-            else
-                LlamaCppNative.embeddings_seq(state.ctx, 0, dims)
+                pooling = LlamaCppNative.pooling_type(state.ctx)
+                embedding = if pooling == LlamaCppNative.LLAMA_POOLING_TYPE_NONE
+                    LlamaCppNative.embeddings_ith(state.ctx, length(tokens) - 1, dims)
+                else
+                    LlamaCppNative.embeddings_seq(state.ctx, 0, dims)
+                end
+
+                embedding !== nothing && (result[:, i] = embedding)
             end
-
-            embedding !== nothing && (result[:, i] = embedding)
         end
-    end
 
-    return result
+        return result
+    end
 end
 
 """
