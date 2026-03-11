@@ -66,6 +66,39 @@ end
         @test score_by_id[stronger_id] > score_by_id[weaker_id]
     end
 
+    @testset "embedding formatting helpers" begin
+        qwen_model = "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+
+        @test LocalSearch.Embed.format_query_for_embedding("hello world") == "task: search result | query: hello world"
+        @test LocalSearch.Embed.format_document_for_embedding("body text"; title="Doc Title") == "title: Doc Title | text: body text"
+        @test LocalSearch.Embed.format_document_for_embedding("body text") == "title: none | text: body text"
+
+        @test LocalSearch.Embed.format_query_for_embedding("hello world"; model=qwen_model) ==
+            "Instruct: Retrieve relevant documents for the given query\nQuery: hello world"
+        @test LocalSearch.Embed.format_document_for_embedding("body text"; title="Doc Title", model=qwen_model) ==
+            "Doc Title\nbody text"
+        @test LocalSearch.Embed.format_document_for_embedding("body text"; model=qwen_model) == "body text"
+    end
+
+    @testset "custom embeddings receive formatted query and document text" begin
+        captured = Vector{Vector{String}}()
+
+        function recording_embed(texts::Vector{String})
+            push!(captured, copy(texts))
+            return fill(0.25f0, 4, length(texts))
+        end
+
+        store = Store(; embed=recording_embed, token_count=fake_token_count, chunk_max_tokens=32, chunk_overlap_tokens=0)
+        empty!(captured)  # Discard constructor probe used for dimension detection
+
+        load!(store, "body text"; id="doc", title="Doc Title")
+        @test captured == [["title: Doc Title | text: body text"]]
+
+        empty!(captured)
+        LocalSearch.search_vec(store, "body text"; limit=5)
+        @test captured == [["task: search result | query: body text"]]
+    end
+
     @testset "load! / update / delete / clear" begin
         store = Store(; embed=nothing)
         load!(store, "hello world"; id="a", tags=["greeting"])

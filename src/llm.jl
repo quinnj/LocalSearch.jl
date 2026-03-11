@@ -9,6 +9,24 @@ using ..LlamaCppNative
 const DEFAULT_MODEL_URI = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf"
 const EMBED_THREADS = 6
 
+function is_qwen3_embedding_model(model_uri::AbstractString)
+    return occursin(r"qwen.*embed"i, model_uri) || occursin(r"embed.*qwen"i, model_uri)
+end
+
+function format_query_for_embedding(query::AbstractString; model::AbstractString=DEFAULT_MODEL_URI)
+    if is_qwen3_embedding_model(model)
+        return "Instruct: Retrieve relevant documents for the given query\nQuery: $(query)"
+    end
+    return "task: search result | query: $(query)"
+end
+
+function format_document_for_embedding(text::AbstractString; title::AbstractString="", model::AbstractString=DEFAULT_MODEL_URI)
+    if is_qwen3_embedding_model(model)
+        return isempty(title) ? String(text) : "$(title)\n$(text)"
+    end
+    return "title: $(isempty(title) ? "none" : title) | text: $(text)"
+end
+
 # --- Model download ---
 
 function models_dir()

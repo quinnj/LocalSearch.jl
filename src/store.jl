@@ -342,7 +342,7 @@ function load!(store::Store, text::AbstractString;
     replace_document_tags!(store.db, Int(inserted.id), normalized_tags)
 
     if store.embed !== nothing
-        embed_content!(store, hash, text; max_tokens=max_tokens, overlap_tokens=overlap_tokens)
+        embed_content!(store, hash, text; max_tokens=max_tokens, overlap_tokens=overlap_tokens, title=title)
     end
 
     return store
@@ -407,14 +407,14 @@ function load!(store::Store, texts::AbstractVector{<:AbstractString};
     return store
 end
 
-function embed_content!(store::Store, hash::AbstractString, text::AbstractString; max_tokens::Int, overlap_tokens::Int)
+function embed_content!(store::Store, hash::AbstractString, text::AbstractString; max_tokens::Int, overlap_tokens::Int, title::AbstractString="")
     # Skip if already embedded (shared content across documents)
     existing = _first_or_nothing(SQLite.DBInterface.execute(store.db,
         "SELECT COUNT(*) as n FROM chunks WHERE hash = ?", (String(hash),)))
     existing !== nothing && existing.n > 0 && return
 
     chunks = chunk_text_by_tokens(store, String(text); max_tokens=max_tokens, overlap_tokens=overlap_tokens)
-    texts = [c.text for c in chunks]
+    texts = [Embed.format_document_for_embedding(c.text; title=title) for c in chunks]
     embeddings = store.embed(texts)  # dims × n_chunks
 
     for (i, chunk) in enumerate(chunks)

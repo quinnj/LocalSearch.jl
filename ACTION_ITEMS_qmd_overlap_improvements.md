@@ -26,7 +26,7 @@
 - Verification evidence:
   - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding a regression test that compares raw BM25 ordering against normalized search scores.
 
-### [ ] ITEM-002 (P1) Add query/document embedding formatting
+### [x] ITEM-002 (P1) Add query/document embedding formatting
 - Description: LocalSearch currently embeds raw query text and raw chunk text, while qmd now formats queries and documents differently and includes document titles when embedding content. LocalSearch already has titles available, but does not use them in embeddings.
 - Desired outcome: Queries and documents should be embedded with explicit formatting helpers, and document embeddings should include titles when present.
 - Affected files: `src/llm.jl`, `src/store.jl`, `src/search.jl`, `test/runtests.jl`
@@ -45,6 +45,8 @@
   - LocalSearch formats query and document text explicitly before embedding.
   - Document formatting includes titles when available.
   - Tests cover both query and document formatting paths.
+- Verification evidence:
+  - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding helper coverage and recording-embed tests for formatted query/document inputs.
 
 ### [ ] ITEM-003 (P1) Track embedding model metadata in stored vectors
 - Description: LocalSearch stores chunk positions and timestamps for embeddings, but it does not record which embedding model produced those vectors. That makes it impossible to detect stale vectors after model changes.

@@ -133,7 +133,8 @@ function search_vec(store::Store, query::AbstractString; limit::Int=20, tags::Ve
     has_vectors(store) || return SearchResult[]
     normalized_tags = normalize_tags(tags)
 
-    query_embedding = store.embed([query])[:, 1]
+    formatted_query = Embed.format_query_for_embedding(query)
+    query_embedding = store.embed([formatted_query])[:, 1]
     vec = Float32.(query_embedding)
 
     vec_rows = SQLite.DBInterface.execute(store.db,
