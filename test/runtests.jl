@@ -99,6 +99,78 @@ end
         @test captured == [["task: search result | query: body text"]]
     end
 
+    @testset "embedding metadata records active model label" begin
+        store = Store(; embed=fake_embed, token_count=fake_token_count, chunk_max_tokens=32, chunk_overlap_tokens=0, embed_label="model-v1")
+        load!(store, "body text"; id="doc", title="Doc Title")
+
+        models = [String(row.model) for row in SQLite.DBInterface.execute(store.db,
+            "SELECT DISTINCT model FROM chunks WHERE hash = (SELECT hash FROM documents WHERE key = ?)",
+            ("doc",))]
+        @test models == ["model-v1"]
+    end
+
+    @testset "model changes trigger re-embedding" begin
+        path = tempname()
+
+        store1 = Store(path; embed=fake_embed, token_count=fake_token_count, chunk_max_tokens=32, chunk_overlap_tokens=0, embed_label="model-v1")
+        load!(store1, "body text"; id="doc", title="Doc Title")
+        close(store1)
+
+        captured = Vector{Vector{String}}()
+        function recording_embed_with_model_change(texts::Vector{String})
+            push!(captured, copy(texts))
+            return fill(0.5f0, 4, length(texts))
+        end
+
+        store2 = Store(path; embed=recording_embed_with_model_change, token_count=fake_token_count, chunk_max_tokens=32, chunk_overlap_tokens=0, embed_label="model-v2")
+        empty!(captured)  # constructor probe
+
+        load!(store2, "body text"; id="doc", title="Doc Title")
+        @test captured == [["title: Doc Title | text: body text"]]
+
+        models = [String(row.model) for row in SQLite.DBInterface.execute(store2.db, "SELECT DISTINCT model FROM chunks")]
+        @test models == ["model-v2"]
+        close(store2)
+    end
+
+    @testset "title changes trigger re-embedding" begin
+        captured = Vector{Vector{String}}()
+
+        function recording_embed_with_title_updates(texts::Vector{String})
+            push!(captured, copy(texts))
+            return fill(0.5f0, 4, length(texts))
+        end
+
+        store = Store(; embed=recording_embed_with_title_updates, token_count=fake_token_count, chunk_max_tokens=32, chunk_overlap_tokens=0, embed_label="model-v1")
+        empty!(captured)  # constructor probe
+
+        load!(store, "body text"; id="doc", title="Old Title")
+        empty!(captured)
+
+        load!(store, "body text"; id="doc", title="New Title")
+        @test captured == [["title: New Title | text: body text"]]
+    end
+
+    @testset "legacy chunks schema is migrated to include model metadata" begin
+        path = tempname()
+        db = SQLite.DB(path)
+        SQLite.execute(db, """
+            CREATE TABLE chunks (
+                hash TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                pos INTEGER NOT NULL,
+                embedded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+                PRIMARY KEY (hash, seq)
+            )
+        """)
+        SQLite.close(db)
+
+        store = Store(path; embed=nothing)
+        columns = [String(row.name) for row in SQLite.DBInterface.execute(store.db, "PRAGMA table_info(chunks)")]
+        @test "model" in columns
+        close(store)
+    end
+
     @testset "load! / update / delete / clear" begin
         store = Store(; embed=nothing)
         load!(store, "hello world"; id="a", tags=["greeting"])

@@ -52,6 +52,7 @@ end
 mutable struct Store
     db::SQLite.DB
     embed::Union{Nothing, Function}  # (Vector{String}) -> Matrix{Float32} (dims × n)
+    embed_model::Union{Nothing, String}
     dimensions::Int
     vec_initialized::Bool
     token_count::Union{Nothing, Function}  # (AbstractString) -> Int
@@ -60,7 +61,7 @@ mutable struct Store
 end
 
 """
-    Store(path=":memory:"; embed=:default, token_count=nothing, chunk_max_tokens=900, chunk_overlap_tokens=135)
+    Store(path=":memory:"; embed=:default, token_count=nothing, chunk_max_tokens=900, chunk_overlap_tokens=135, model_uri=Embed.DEFAULT_MODEL_URI, embed_label=nothing)
 
 Create a new search store backed by SQLite.
 
@@ -72,6 +73,8 @@ Create a new search store backed by SQLite.
 - `token_count`: optional token counting function `(text) -> Int`; defaults to model tokenization for `:default` embeddings
 - `chunk_max_tokens`: max tokens per embedded chunk
 - `chunk_overlap_tokens`: overlap tokens between adjacent chunks
+- `model_uri`: embedding model URI for built-in embeddings
+- `embed_label`: optional identifier to persist for custom embedding functions
 
 # Examples
 ```julia
@@ -92,50 +95,71 @@ function Store(path::AbstractString=":memory:";
                embed=_USE_DEFAULT_EMBED,
                token_count::Union{Nothing,Function}=nothing,
                chunk_max_tokens::Int=DEFAULT_CHUNK_MAX_TOKENS,
-               chunk_overlap_tokens::Int=DEFAULT_CHUNK_OVERLAP_TOKENS)
+               chunk_overlap_tokens::Int=DEFAULT_CHUNK_OVERLAP_TOKENS,
+               model_uri::AbstractString=Embed.DEFAULT_MODEL_URI,
+               embed_label::Union{Nothing,AbstractString}=nothing)
     db = SQLite.DB(path)
     configure_db!(db)
-    return Store(db; embed, token_count, chunk_max_tokens, chunk_overlap_tokens)
+    return Store(db;
+        embed=embed,
+        token_count=token_count,
+        chunk_max_tokens=chunk_max_tokens,
+        chunk_overlap_tokens=chunk_overlap_tokens,
+        model_uri=model_uri,
+        embed_label=embed_label)
 end
 
 function Store(db::SQLite.DB;
                embed=_USE_DEFAULT_EMBED,
                token_count::Union{Nothing,Function}=nothing,
                chunk_max_tokens::Int=DEFAULT_CHUNK_MAX_TOKENS,
-               chunk_overlap_tokens::Int=DEFAULT_CHUNK_OVERLAP_TOKENS)
+               chunk_overlap_tokens::Int=DEFAULT_CHUNK_OVERLAP_TOKENS,
+               model_uri::AbstractString=Embed.DEFAULT_MODEL_URI,
+               embed_label::Union{Nothing,AbstractString}=nothing)
     validate_chunk_params(chunk_max_tokens, chunk_overlap_tokens)
     init_schema!(db)
 
     embed_fn = if embed === _USE_DEFAULT_EMBED
-        Embed.default_embed
+        texts -> Embed.default_embed(texts; model=model_uri)
     elseif embed === nothing || embed === false
         nothing
     else
         embed
     end
 
+    embed_model = if embed_fn === nothing
+        nothing
+    elseif embed === _USE_DEFAULT_EMBED
+        String(model_uri)
+    elseif embed_label === nothing
+        string(typeof(embed_fn))
+    else
+        String(embed_label)
+    end
+
     token_count_fn = if embed_fn === nothing
         nothing
     elseif token_count !== nothing
         token_count
-    elseif embed_fn === Embed.default_embed
-        Embed.default_token_count
+    elseif embed === _USE_DEFAULT_EMBED
+        text -> Embed.default_token_count(text; model=model_uri)
     else
         approximate_token_count
     end
 
-    store = Store(db, embed_fn, 0, false, token_count_fn, chunk_max_tokens, chunk_overlap_tokens)
+    store = Store(db, embed_fn, embed_model, 0, false, token_count_fn, chunk_max_tokens, chunk_overlap_tokens)
 
     # Eagerly init: download model + create vectors table now
     if embed_fn !== nothing
-        dims = if embed_fn === Embed.default_embed
-            Embed.ensure_init!()
+        dims = if embed === _USE_DEFAULT_EMBED
+            Embed.ensure_init!(; model_uri=model_uri)
         else
             test = embed_fn(["test"])
             size(test, 1)
         end
         store.dimensions = dims
         init_vectors!(store)
+        cleanup_stale_embeddings!(store)
     end
 
     return store
@@ -240,16 +264,32 @@ function init_schema!(db::SQLite.DB)
             hash TEXT NOT NULL,
             seq INTEGER NOT NULL,
             pos INTEGER NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
             embedded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
             PRIMARY KEY (hash, seq)
         )
     """)
+    chunk_columns = Set{String}()
+    for row in SQLite.DBInterface.execute(db, "PRAGMA table_info(chunks)")
+        push!(chunk_columns, String(row.name))
+    end
+    "model" in chunk_columns || SQLite.execute(db, "ALTER TABLE chunks ADD COLUMN model TEXT NOT NULL DEFAULT ''")
 end
 
 function init_vectors!(store::Store)
     store.vec_initialized && return
     load_sqlite_vec!(store.db)
     dims = store.dimensions
+    existing_sql = [String(row.sql) for row in SQLite.DBInterface.execute(store.db,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vectors'")]
+    if !isempty(existing_sql)
+        sql = existing_sql[1]
+        m = match(r"float\[(\d+)\]", sql)
+        if m !== nothing && parse(Int, m.captures[1]) != dims
+            SQLite.execute(store.db, "DROP TABLE IF EXISTS vectors")
+            SQLite.execute(store.db, "DELETE FROM chunks")
+        end
+    end
     SQLite.execute(store.db, """
         CREATE VIRTUAL TABLE IF NOT EXISTS vectors USING vec0(
             hash_seq TEXT PRIMARY KEY,
@@ -281,6 +321,49 @@ function has_vectors(store::Store)
     row = _first_or_nothing(SQLite.DBInterface.execute(store.db,
         "SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'"))
     return row !== nothing
+end
+
+function current_embed_model(store::Store)
+    store.embed_model === nothing && throw(ArgumentError("Embedding model is not configured for this store"))
+    return store.embed_model
+end
+
+function remove_embeddings!(store::Store, hash::AbstractString)
+    if store.vec_initialized
+        seqs = Int[]
+        for row in SQLite.DBInterface.execute(store.db, "SELECT seq FROM chunks WHERE hash = ?", (String(hash),))
+            push!(seqs, Int(row.seq))
+        end
+        for seq in seqs
+            SQLite.execute(store.db, "DELETE FROM vectors WHERE hash_seq = ?", ("$(hash)_$(seq)",))
+        end
+    end
+    SQLite.execute(store.db, "DELETE FROM chunks WHERE hash = ?", (String(hash),))
+    return nothing
+end
+
+function embeddings_current(store::Store, hash::AbstractString)
+    expected_model = current_embed_model(store)
+    saw_rows = false
+    for row in SQLite.DBInterface.execute(store.db, "SELECT model FROM chunks WHERE hash = ?", (String(hash),))
+        saw_rows = true
+        String(row.model) == expected_model || return false
+    end
+    return saw_rows
+end
+
+function cleanup_stale_embeddings!(store::Store)
+    store.embed_model === nothing && return nothing
+    stale_hashes = String[]
+    for row in SQLite.DBInterface.execute(store.db,
+        "SELECT DISTINCT hash FROM chunks WHERE model != ?",
+        (store.embed_model,))
+        push!(stale_hashes, String(row.hash))
+    end
+    for hash in stale_hashes
+        remove_embeddings!(store, hash)
+    end
+    return nothing
 end
 
 # --- load! ---
@@ -322,12 +405,24 @@ function load!(store::Store, text::AbstractString;
         same_hash = existing_hash == hash
         same_title = String(existing.title) == String(title)
         same_tags = document_tags(store.db, existing_id) == normalized_tags
-        same_hash && same_title && same_tags && return store
+        if same_hash && same_title && same_tags
+            if store.embed !== nothing
+                embed_content!(store, hash, text; max_tokens=max_tokens, overlap_tokens=overlap_tokens, title=title)
+            end
+            return store
+        end
         if same_hash
             same_title || SQLite.execute(store.db,
                 "UPDATE documents SET title = ? WHERE key = ?",
                 (String(title), key))
             replace_document_tags!(store.db, existing_id, normalized_tags)
+            if store.embed !== nothing
+                embed_content!(store, hash, text;
+                    max_tokens=max_tokens,
+                    overlap_tokens=overlap_tokens,
+                    title=title,
+                    force=!same_title)
+            end
             return store
         end
         Base.delete!(store, key)
@@ -407,14 +502,20 @@ function load!(store::Store, texts::AbstractVector{<:AbstractString};
     return store
 end
 
-function embed_content!(store::Store, hash::AbstractString, text::AbstractString; max_tokens::Int, overlap_tokens::Int, title::AbstractString="")
-    # Skip if already embedded (shared content across documents)
-    existing = _first_or_nothing(SQLite.DBInterface.execute(store.db,
-        "SELECT COUNT(*) as n FROM chunks WHERE hash = ?", (String(hash),)))
-    existing !== nothing && existing.n > 0 && return
+function embed_content!(store::Store, hash::AbstractString, text::AbstractString;
+                        max_tokens::Int,
+                        overlap_tokens::Int,
+                        title::AbstractString="",
+                        force::Bool=false)
+    if !force && embeddings_current(store, hash)
+        return
+    end
 
+    remove_embeddings!(store, hash)
+
+    model = current_embed_model(store)
     chunks = chunk_text_by_tokens(store, String(text); max_tokens=max_tokens, overlap_tokens=overlap_tokens)
-    texts = [Embed.format_document_for_embedding(c.text; title=title) for c in chunks]
+    texts = [Embed.format_document_for_embedding(c.text; title=title, model=model) for c in chunks]
     embeddings = store.embed(texts)  # dims × n_chunks
 
     for (i, chunk) in enumerate(chunks)
@@ -422,8 +523,8 @@ function embed_content!(store::Store, hash::AbstractString, text::AbstractString
         hash_seq = "$(hash)_$(seq)"
         vec = Float32.(embeddings[:, i])
         SQLite.execute(store.db,
-            "INSERT OR REPLACE INTO chunks(hash, seq, pos) VALUES (?, ?, ?)",
-            (String(hash), seq, chunk.pos))
+            "INSERT OR REPLACE INTO chunks(hash, seq, pos, model) VALUES (?, ?, ?, ?)",
+            (String(hash), seq, chunk.pos, model))
         SQLite.execute(store.db,
             "INSERT OR REPLACE INTO vectors(hash_seq, embedding) VALUES (?, ?)",
             (hash_seq, reinterpret(UInt8, vec)))
@@ -454,19 +555,7 @@ function Base.delete!(store::Store, id::AbstractString)
         "SELECT COUNT(*) as n FROM documents WHERE hash = ?", (hash,)))
 
     if remaining !== nothing && remaining.n == 0
-        # Remove vectors (must happen before chunks, since we need chunk seqs)
-        if store.vec_initialized
-            seqs = Int[]
-            for crow in SQLite.DBInterface.execute(store.db,
-                "SELECT seq FROM chunks WHERE hash = ?", (hash,))
-                push!(seqs, Int(crow.seq))
-            end
-            for seq in seqs
-                hash_seq = "$(hash)_$(seq)"
-                SQLite.execute(store.db, "DELETE FROM vectors WHERE hash_seq = ?", (hash_seq,))
-            end
-        end
-        SQLite.execute(store.db, "DELETE FROM chunks WHERE hash = ?", (hash,))
+        remove_embeddings!(store, hash)
         SQLite.execute(store.db, "DELETE FROM content WHERE hash = ?", (hash,))
     end
 

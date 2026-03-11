@@ -48,7 +48,7 @@
 - Verification evidence:
   - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding helper coverage and recording-embed tests for formatted query/document inputs.
 
-### [ ] ITEM-003 (P1) Track embedding model metadata in stored vectors
+### [x] ITEM-003 (P1) Track embedding model metadata in stored vectors
 - Description: LocalSearch stores chunk positions and timestamps for embeddings, but it does not record which embedding model produced those vectors. That makes it impossible to detect stale vectors after model changes.
 - Desired outcome: Stored vector metadata should include the embedding model identifier, and LocalSearch should re-embed content when persisted vectors were generated with a different model URI.
 - Affected files: `src/store.jl`, `src/llm.jl`, `test/runtests.jl`
@@ -68,6 +68,8 @@
   - Stored embedding metadata includes a model identifier.
   - Existing content is re-embedded when the active model changes.
   - Tests cover both persistence and stale-vector replacement.
+- Verification evidence:
+  - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding metadata persistence, model-change refresh, title-change refresh, and legacy-schema migration coverage.
 
 ### [ ] ITEM-004 (P1) Improve token chunking with structural breakpoints
 - Description: LocalSearch chunking is purely token-window based and repeatedly tokenizes substrings during binary search. qmd now uses markdown-aware breakpoints and code-fence protection to produce better chunks for the same underlying retrieval behavior.

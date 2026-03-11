@@ -133,7 +133,7 @@ function search_vec(store::Store, query::AbstractString; limit::Int=20, tags::Ve
     has_vectors(store) || return SearchResult[]
     normalized_tags = normalize_tags(tags)
 
-    formatted_query = Embed.format_query_for_embedding(query)
+    formatted_query = Embed.format_query_for_embedding(query; model=something(store.embed_model, Embed.DEFAULT_MODEL_URI))
     query_embedding = store.embed([formatted_query])[:, 1]
     vec = Float32.(query_embedding)
 
@@ -152,15 +152,18 @@ function search_vec(store::Store, query::AbstractString; limit::Int=20, tags::Ve
 
     placeholders = join(fill("?", length(hash_seqs)), ",")
     tag_clause, tag_params = build_tag_filter_clause(normalized_tags)
+    current_model = current_embed_model(store)
     sql = """
     SELECT ch.hash || '_' || ch.seq as hash_seq,
            d.key, d.title, c.body
     FROM chunks ch
     JOIN documents d ON d.hash = ch.hash AND d.active = 1
     JOIN content c ON c.hash = d.hash
-    WHERE ch.hash || '_' || ch.seq IN ($placeholders)$tag_clause
+    WHERE ch.hash || '_' || ch.seq IN ($placeholders)
+      AND ch.model = ?$tag_clause
     """
     params = Any[hash_seqs...]
+    push!(params, current_model)
     append!(params, tag_params)
     doc_rows = SQLite.DBInterface.execute(store.db, sql, Tuple(params))
 
