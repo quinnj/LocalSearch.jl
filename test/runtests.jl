@@ -71,6 +71,16 @@ end
         @test isempty(all_negative_results)
     end
 
+    @testset "BM25 weighting favors key and title signal over body-only matches" begin
+        store = Store(; embed=nothing)
+        load!(store, "completely unrelated content"; id="alpha-manual", title="Reference")
+        load!(store, "completely unrelated content"; id="doc-title", title="Alpha Manual")
+        load!(store, "alpha manual appears only in the body text"; id="doc-body", title="Reference")
+
+        results = search(store, "alpha manual"; limit=3)
+        @test [result.id for result in results] == ["alpha-manual", "doc-title", "doc-body"]
+    end
+
     @testset "BM25 score normalization preserves match strength ordering" begin
         store = Store(; embed=nothing)
         load!(store, "alpha beta gamma"; id="strong", title="Strong")

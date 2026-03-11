@@ -115,7 +115,7 @@
 - Verification evidence:
   - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding direct builder tests plus phrase/negation search coverage.
 
-### [ ] ITEM-006 (P2) Retune FTS column weights
+### [x] ITEM-006 (P2) Retune FTS column weights
 - Description: LocalSearch currently weights BM25 columns as key=1, title=5, body=10, which likely under-emphasizes identifiers and over-emphasizes body matches relative to titles. qmd has moved toward stronger weighting for high-signal metadata fields.
 - Desired outcome: BM25 weighting should better reward identifier/title matches without harming ordinary content search.
 - Affected files: `src/search.jl`, `test/runtests.jl`
@@ -132,3 +132,5 @@
 - Completion criteria:
   - BM25 weighting better favors key/title signal.
   - Tests demonstrate the intended ranking order for representative inputs.
+- Verification evidence:
+  - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after reweighting BM25 columns and adding a ranking-order regression test.

@@ -1,6 +1,9 @@
 # Search: BM25 (FTS5), vector similarity, and hybrid RRF blending
 
 const RRF_K = 60
+const FTS_KEY_WEIGHT = 10.0
+const FTS_TITLE_WEIGHT = 5.0
+const FTS_BODY_WEIGHT = 1.0
 
 struct RankedItem
     key::String
@@ -160,7 +163,7 @@ function search_fts(store::Store, query::AbstractString; limit::Int=20, tags::Ve
 
     sql = """
     SELECT d.key, d.title, d.hash, c.body,
-           bm25(documents_fts, 1.0, 5.0, 10.0) as rank
+           bm25(documents_fts, $FTS_KEY_WEIGHT, $FTS_TITLE_WEIGHT, $FTS_BODY_WEIGHT) as rank
     FROM documents_fts f
     JOIN documents d ON d.id = f.rowid
     JOIN content c ON c.hash = d.hash
