@@ -78,17 +78,71 @@ end
 
 # --- BM25 / FTS5 ---
 
+function sanitize_fts_term(term::AbstractString)
+    clean = replace(String(term), r"[^\p{L}\p{N}']" => "")
+    return lowercase(clean)
+end
+
 function build_fts_query(query::AbstractString)
-    terms = split(String(query))
-    sanitized = String[]
-    for term in terms
-        clean = replace(term, r"[^\p{L}\p{N}']" => "")
-        isempty(clean) && continue
-        push!(sanitized, lowercase(clean))
+    chars = collect(strip(String(query)))
+    isempty(chars) && return nothing
+
+    positive = String[]
+    negative = String[]
+    i = 1
+
+    while i <= length(chars)
+        while i <= length(chars) && isspace(chars[i])
+            i += 1
+        end
+        i > length(chars) && break
+
+        negated = chars[i] == '-'
+        negated && (i += 1)
+        i > length(chars) && break
+
+        if chars[i] == '"'
+            i += 1
+            start = i
+            while i <= length(chars) && chars[i] != '"'
+                i += 1
+            end
+            i > length(chars) && return nothing
+
+            phrase = strip(String(chars[start:(i - 1)]))
+            i += 1
+
+            tokens = String[]
+            for token in split(phrase)
+                sanitized = sanitize_fts_term(token)
+                isempty(sanitized) && continue
+                push!(tokens, sanitized)
+            end
+            isempty(tokens) && continue
+
+            term = "\"" * join(tokens, " ") * "\""
+            push!(negated ? negative : positive, term)
+            continue
+        end
+
+        start = i
+        while i <= length(chars) && !isspace(chars[i]) && chars[i] != '"'
+            i += 1
+        end
+
+        token = sanitize_fts_term(String(chars[start:(i - 1)]))
+        isempty(token) && continue
+        term = "\"$(token)\"*"
+        push!(negated ? negative : positive, term)
     end
-    isempty(sanitized) && return nothing
-    length(sanitized) == 1 && return "\"$(sanitized[1])\"*"
-    return join(["\"$t\"*" for t in sanitized], " AND ")
+
+    isempty(positive) && return nothing
+
+    result = join(positive, " AND ")
+    for term in negative
+        result *= " NOT $term"
+    end
+    return result
 end
 
 function build_tag_filter_clause(tags::Vector{String})

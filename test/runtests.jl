@@ -42,6 +42,35 @@ end
         @test results[1].id == "sqlite"
     end
 
+    @testset "lexical query builder supports phrases and negation" begin
+        @test LocalSearch.build_fts_query("\"machine learning\"") == "\"machine learning\""
+        @test LocalSearch.build_fts_query("performance -sports") == "\"performance\"* NOT \"sports\"*"
+        @test LocalSearch.build_fts_query("-sports") === nothing
+        @test LocalSearch.build_fts_query("\"unterminated phrase") === nothing
+    end
+
+    @testset "BM25 phrase and negation search" begin
+        store = Store(; embed=nothing)
+        load!(store, "machine learning systems"; id="ml", title="ML")
+        load!(store, "machine systems learning"; id="mixed", title="Mixed")
+        load!(store, "performance review for sports team"; id="sports", title="Sports")
+        load!(store, "performance review for database queries"; id="db", title="Database")
+
+        phrase_results = search(store, "\"machine learning\"")
+        @test length(phrase_results) == 1
+        @test phrase_results[1].id == "ml"
+
+        negated_results = search(store, "performance -sports")
+        @test length(negated_results) == 1
+        @test negated_results[1].id == "db"
+
+        unmatched_quote_results = search(store, "\"unterminated phrase")
+        @test isempty(unmatched_quote_results)
+
+        all_negative_results = search(store, "-sports")
+        @test isempty(all_negative_results)
+    end
+
     @testset "BM25 score normalization preserves match strength ordering" begin
         store = Store(; embed=nothing)
         load!(store, "alpha beta gamma"; id="strong", title="Strong")

@@ -93,7 +93,7 @@
 - Verification evidence:
   - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding structural-boundary and fenced-code chunking tests and fixing an overlap edge exposed by the new cutoffs.
 
-### [ ] ITEM-005 (P1) Improve lexical query parsing
+### [x] ITEM-005 (P1) Improve lexical query parsing
 - Description: LocalSearch’s current FTS query builder strips most punctuation and only supports simple ANDed prefix terms. qmd has improved its lexical parser to preserve quoted phrases and support exclusions, which is directly relevant to LocalSearch’s existing BM25 feature set.
 - Desired outcome: LocalSearch should support quoted phrases and negated terms in lexical search while keeping invalid or degenerate cases safe.
 - Affected files: `src/search.jl`, `test/runtests.jl`
@@ -112,6 +112,8 @@
   - Phrase and negation syntax work correctly in LocalSearch lexical search.
   - Invalid lexical input is handled safely.
   - Existing simple-term behavior still passes tests.
+- Verification evidence:
+  - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding direct builder tests plus phrase/negation search coverage.
 
 ### [ ] ITEM-006 (P2) Retune FTS column weights
 - Description: LocalSearch currently weights BM25 columns as key=1, title=5, body=10, which likely under-emphasizes identifiers and over-emphasizes body matches relative to titles. qmd has moved toward stronger weighting for high-signal metadata fields.
