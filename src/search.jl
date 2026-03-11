@@ -120,7 +120,8 @@ function search_fts(store::Store, query::AbstractString; limit::Int=20, tags::Ve
     rows = SQLite.DBInterface.execute(store.db, sql, Tuple(params))
     results = SearchResult[]
     for row in rows
-        score = 1.0 / (1.0 + max(0.0, -Float64(row.rank)))
+        raw_rank = Float64(row.rank)
+        score = abs(raw_rank) / (1.0 + abs(raw_rank))
         push!(results, SearchResult(String(row.key), String(row.title), String(row.body), score, :fts))
     end
     return results

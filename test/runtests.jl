@@ -42,6 +42,30 @@ end
         @test results[1].id == "sqlite"
     end
 
+    @testset "BM25 score normalization preserves match strength ordering" begin
+        store = Store(; embed=nothing)
+        load!(store, "alpha beta gamma"; id="strong", title="Strong")
+        load!(store, "alpha beta"; id="weak", title="Weak")
+
+        fts_query = LocalSearch.build_fts_query("alpha beta")
+        rank_by_id = Dict{String, Float64}()
+        for row in SQLite.DBInterface.execute(store.db, """
+            SELECT d.key, bm25(documents_fts, 1.0, 5.0, 10.0) as rank
+            FROM documents_fts f
+            JOIN documents d ON d.id = f.rowid
+            WHERE documents_fts MATCH ?
+            ORDER BY rank ASC
+        """, (fts_query,))
+            rank_by_id[String(row.key)] = Float64(row.rank)
+        end
+        @test length(rank_by_id) == 2
+
+        score_by_id = Dict(result.id => result.score for result in search(store, "alpha beta"; limit=10))
+
+        stronger_id, weaker_id = rank_by_id["strong"] < rank_by_id["weak"] ? ("strong", "weak") : ("weak", "strong")
+        @test score_by_id[stronger_id] > score_by_id[weaker_id]
+    end
+
     @testset "load! / update / delete / clear" begin
         store = Store(; embed=nothing)
         load!(store, "hello world"; id="a", tags=["greeting"])
