@@ -71,7 +71,7 @@
 - Verification evidence:
   - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding metadata persistence, model-change refresh, title-change refresh, and legacy-schema migration coverage.
 
-### [ ] ITEM-004 (P1) Improve token chunking with structural breakpoints
+### [x] ITEM-004 (P1) Improve token chunking with structural breakpoints
 - Description: LocalSearch chunking is purely token-window based and repeatedly tokenizes substrings during binary search. qmd now uses markdown-aware breakpoints and code-fence protection to produce better chunks for the same underlying retrieval behavior.
 - Desired outcome: Chunking should prefer structural markdown boundaries, avoid splitting inside fenced code blocks when possible, and retain token-limit guarantees.
 - Affected files: `src/store.jl`, `test/runtests.jl`
@@ -90,6 +90,8 @@
   - Chunking prefers useful structural cut points.
   - Fenced code blocks are not split internally when avoidable.
   - Tests cover the new chunking behavior and token limits still hold.
+- Verification evidence:
+  - `julia --project=/Users/jacob.quinn/.julia/dev/LocalSearch -e 'using Pkg; Pkg.test()'` passed on 2026-03-11 after adding structural-boundary and fenced-code chunking tests and fixing an overlap edge exposed by the new cutoffs.
 
 ### [ ] ITEM-005 (P1) Improve lexical query parsing
 - Description: LocalSearch’s current FTS query builder strips most punctuation and only supports simple ANDed prefix terms. qmd has improved its lexical parser to preserve quoted phrases and support exclusions, which is directly relevant to LocalSearch’s existing BM25 feature set.

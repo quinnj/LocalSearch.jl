@@ -8,6 +8,7 @@ end
 
 const DEFAULT_CHUNK_MAX_TOKENS = 900
 const DEFAULT_CHUNK_OVERLAP_TOKENS = 135
+const CHUNK_BREAK_WINDOW_CHARS = 800
 
 # Sentinel for "use default embedding"
 const _USE_DEFAULT_EMBED = :__default__
@@ -47,6 +48,117 @@ function validate_chunk_params(max_tokens::Int, overlap_tokens::Int)
     overlap_tokens >= 0 || throw(ArgumentError("chunk_overlap_tokens must be >= 0"))
     overlap_tokens < max_tokens || throw(ArgumentError("chunk_overlap_tokens must be < chunk_max_tokens"))
     return nothing
+end
+
+struct BreakPoint
+    pos::Int
+    score::Int
+end
+
+struct CodeFenceRegion
+    start::Int
+    stop::Int
+end
+
+function structural_break_score(line::AbstractString)
+    isempty(line) && return 20
+    startswith(line, "```") && return 80
+    line in ("---", "***", "___") && return 60
+    startswith(line, "- ") && return 5
+    startswith(line, "* ") && return 5
+    occursin(r"^\d+\.\s", line) && return 5
+
+    m = match(r"^(#{1,6})\s", line)
+    m === nothing && return 0
+    return 110 - (10 * length(only(m.captures)))
+end
+
+function scan_breakpoints(chars::Vector{Char})
+    n = length(chars)
+    seen = Dict{Int, Int}()
+    line_start = 1
+
+    for i in 1:(n + 1)
+        if i > n || chars[i] == '\n'
+            line_end = i - 1
+            if i <= n
+                seen[i] = max(get(seen, i, 0), 1)
+            end
+            if line_start > 1
+                line = strip(String(chars[line_start:line_end]))
+                score = structural_break_score(line)
+                if score > 0
+                    pos = line_start - 1
+                    seen[pos] = max(get(seen, pos, 0), score)
+                end
+            end
+            line_start = i + 1
+        end
+    end
+
+    points = BreakPoint[]
+    for (pos, score) in seen
+        push!(points, BreakPoint(pos, score))
+    end
+    sort!(points; by=bp -> bp.pos)
+    return points
+end
+
+function find_code_fences(chars::Vector{Char})
+    n = length(chars)
+    fences = CodeFenceRegion[]
+    line_start = 1
+    in_fence = false
+    fence_start = 0
+
+    for i in 1:(n + 1)
+        if i > n || chars[i] == '\n'
+            line_end = i - 1
+            line = strip(String(chars[line_start:line_end]))
+            if startswith(line, "```")
+                if !in_fence
+                    fence_start = line_start
+                    in_fence = true
+                else
+                    push!(fences, CodeFenceRegion(fence_start, max(line_end, fence_start)))
+                    in_fence = false
+                end
+            end
+            line_start = i + 1
+        end
+    end
+
+    in_fence && push!(fences, CodeFenceRegion(fence_start, n))
+    return fences
+end
+
+function is_inside_code_fence(pos::Int, fences::Vector{CodeFenceRegion})
+    for fence in fences
+        fence.start <= pos <= fence.stop && return true
+    end
+    return false
+end
+
+function find_best_breakpoint(breakpoints::Vector{BreakPoint}, target_end::Int, fences::Vector{CodeFenceRegion}; window_chars::Int=CHUNK_BREAK_WINDOW_CHARS)
+    window_start = max(1, target_end - window_chars)
+    best_score = -1.0
+    best_pos = 0
+
+    for bp in breakpoints
+        bp.pos < window_start && continue
+        bp.pos > target_end && break
+        is_inside_code_fence(bp.pos, fences) && continue
+
+        normalized_distance = (target_end - bp.pos) / max(window_chars, 1)
+        multiplier = 1.0 - (normalized_distance * normalized_distance) * 0.7
+        score = bp.score * multiplier
+        if score > best_score
+            best_score = score
+            best_pos = bp.pos
+        end
+    end
+
+    return best_pos
 end
 
 mutable struct Store
@@ -593,6 +705,21 @@ function count_tokens(store::Store, text::AbstractString)
     return n < 0 ? 0 : n
 end
 
+function is_word_char(c::Char)
+    return isletter(c) || isnumeric(c) || c == '_'
+end
+
+function align_overlap_start(chars::Vector{Char}, idx::Int, lower_bound::Int)
+    i = idx
+    while i > lower_bound && i <= length(chars) && is_word_char(chars[i]) && is_word_char(chars[i - 1])
+        i -= 1
+    end
+    while i <= length(chars) && isspace(chars[i])
+        i += 1
+    end
+    return min(i, length(chars) + 1)
+end
+
 function find_chunk_end_by_tokens(store::Store, chars::Vector{Char}, start_idx::Int, last_idx::Int, max_tokens::Int)
     lo = start_idx
     hi = last_idx
@@ -630,7 +757,7 @@ function find_overlap_start_by_tokens(store::Store, chars::Vector{Char}, chunk_s
         end
     end
 
-    return best <= chunk_end ? best : (chunk_end + 1)
+    return best <= chunk_end ? align_overlap_start(chars, best, chunk_start) : (chunk_end + 1)
 end
 
 function chunk_text_by_tokens(store::Store, text::AbstractString;
@@ -645,16 +772,24 @@ function chunk_text_by_tokens(store::Store, text::AbstractString;
     chars = collect(body)
     n = length(chars)
     chunks = TextChunk[]
+    breakpoints = scan_breakpoints(chars)
+    code_fences = find_code_fences(chars)
     start_idx = 1
 
     while start_idx <= n
         end_idx = find_chunk_end_by_tokens(store, chars, start_idx, n, max_tokens)
+        if end_idx < n
+            breakpoint_idx = find_best_breakpoint(breakpoints, end_idx, code_fences)
+            if breakpoint_idx > start_idx
+                end_idx = breakpoint_idx
+            end
+        end
         push!(chunks, TextChunk(String(chars[start_idx:end_idx]), start_idx - 1))
         end_idx >= n && break
 
         next_idx = overlap_tokens == 0 ? (end_idx + 1) :
             find_overlap_start_by_tokens(store, chars, start_idx, end_idx, overlap_tokens)
-        next_idx <= start_idx && (next_idx = start_idx + 1)
+        next_idx <= start_idx && (next_idx = end_idx + 1)
         start_idx = next_idx
     end
 

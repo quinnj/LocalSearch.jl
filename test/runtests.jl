@@ -305,6 +305,39 @@ end
         @test db_tight_chunks == expected_tight_chunks
     end
 
+    @testset "token chunking prefers structural markdown boundaries" begin
+        store = Store(; embed=fake_embed, token_count=fake_token_count, chunk_max_tokens=7, chunk_overlap_tokens=1)
+        text = join([
+            "alpha beta gamma delta epsilon zeta",
+            "",
+            "# Heading",
+            "eta theta iota kappa lambda",
+        ], "\n")
+
+        chunks = LocalSearch.chunk_text_by_tokens(store, text; max_tokens=7, overlap_tokens=1)
+        @test length(chunks) >= 2
+        @test any(startswith(chunk.text, "# Heading") for chunk in chunks[2:end])
+    end
+
+    @testset "token chunking avoids splitting fenced code blocks when possible" begin
+        store = Store(; embed=fake_embed, token_count=fake_token_count, chunk_max_tokens=10, chunk_overlap_tokens=1)
+        text = join([
+            "alpha beta gamma delta epsilon zeta",
+            "```julia",
+            "x = 1",
+            "```",
+            "eta theta iota",
+        ], "\n")
+
+        chunks = LocalSearch.chunk_text_by_tokens(store, text; max_tokens=10, overlap_tokens=1)
+        @test length(chunks) >= 2
+        for chunk in chunks
+            if occursin("```julia", chunk.text)
+                @test length(collect(eachmatch(r"```", chunk.text))) >= 2
+            end
+        end
+    end
+
     @testset "tags metadata and tag-filtered search" begin
         store = Store(; embed=nothing)
         load!(store, "Julia language and compiler"; id="julia", tags=[" Lang ", "julia", "LANG"])
